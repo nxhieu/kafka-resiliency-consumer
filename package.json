@@ -1,7 +1,7 @@
 {
   "name": "kafka-resiliency-consumer",
   "version": "1.0.0",
-  "description": "A Kafka consumer that retries what might recover, skips bad messages, and stops on bugs",
+  "description": "A Kafka consumer that retries what might recover, parks what it can't process in a dead-letter topic, and stops when a bug hits every message",
   "type": "module",
   "license": "MIT",
   "author": "Ethan Nguyen",
@@ -11,6 +11,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "produce": "tsx scripts/produce.ts",
+    "replay-dlq": "tsx scripts/replay-dlq.ts",
     "test": "vitest run",
     "typecheck": "tsc"
   },

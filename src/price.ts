@@ -22,7 +22,8 @@ export function parsePriceUpdate(value: Buffer | null): Price {
 
 /**
  * Save the price unless we already have a newer one. Safe to run more than once: Kafka
- * delivers at least once, failed attempts are retried, and partitions get rewound.
+ * delivers at least once, failed attempts are retried, partitions get rewound, and
+ * parked messages get replayed from the DLQ, in any order.
  */
 export async function applyPriceUpdate(update: Price, store: PriceStore): Promise<"applied" | "stale"> {
   const current = await store.get(update.productId);

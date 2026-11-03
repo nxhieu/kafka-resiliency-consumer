@@ -9,12 +9,12 @@ export type ProcessOne = (msg: InboundMessage, heartbeat: () => Promise<void>) =
  */
 export function createBatchHandler(processOne: ProcessOne) {
   return async ({ batch, resolveOffset, heartbeat, isRunning, isStale }: EachBatchPayload): Promise<void> => {
-    for (const { offset, value } of batch.messages) {
+    for (const { offset, key, value } of batch.messages) {
       if (!isRunning() || isStale()) return;
 
       // A StopConsumerError propagates from here. KafkaJS commits the offsets resolved
       // so far, and this message is read again after the restart.
-      await processOne({ partition: batch.partition, offset, value }, heartbeat);
+      await processOne({ topic: batch.topic, partition: batch.partition, offset, key, value }, heartbeat);
       resolveOffset(offset);
       await heartbeat();
     }

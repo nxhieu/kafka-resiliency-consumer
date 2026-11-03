@@ -6,7 +6,7 @@ import { StopConsumerError } from "../src/errors.js";
 function fakeBatch(offsets: string[], stale: () => boolean = () => false) {
   const resolveOffset = vi.fn<(offset: string) => void>();
   const payload = {
-    batch: { partition: 0, messages: offsets.map((offset) => ({ offset, value: Buffer.from("{}") })) },
+    batch: { topic: "prices", partition: 0, messages: offsets.map((offset) => ({ offset, key: Buffer.from("kettle"), value: Buffer.from("{}") })) },
     resolveOffset,
     heartbeat: vi.fn(() => Promise.resolve()),
     isRunning: () => true,
@@ -16,6 +16,17 @@ function fakeBatch(offsets: string[], stale: () => boolean = () => false) {
 }
 
 describe("createBatchHandler", () => {
+  it("passes where the message came from, and its key, to the processor, for the DLQ", async () => {
+    const processOne = vi.fn<ProcessOne>(() => Promise.resolve("applied"));
+    const { payload } = fakeBatch(["0"]);
+
+    await createBatchHandler(processOne)(payload);
+    expect(processOne).toHaveBeenCalledWith(
+      { topic: "prices", partition: 0, offset: "0", key: Buffer.from("kettle"), value: Buffer.from("{}") },
+      payload.heartbeat,
+    );
+  });
+
   it("resolves an offset only after its message has finished processing", async () => {
     let finish = () => {};
     const processOne = vi.fn<ProcessOne>(() => new Promise((resolve) => (finish = () => resolve("applied"))));

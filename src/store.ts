@@ -36,6 +36,8 @@ export interface FaultOptions {
   failureRate?: number;
   /** Calls for this product throw a TypeError, to simulate a bug. */
   bugProductId?: string;
+  /** Fraction of calls (0 to 1) that throw a TypeError. 1 simulates a deploy that broke everything. */
+  bugRate?: number;
   random?: () => number;
 }
 
@@ -67,8 +69,8 @@ export class InMemoryPriceStore implements PriceStore {
 
   private async simulateCall(operation: string, productId: string): Promise<void> {
     await Promise.resolve();
-    const { failureRate = 0, bugProductId, random = Math.random } = this.faults;
-    if (productId === bugProductId) throw new TypeError(`Cannot read properties of undefined (simulated bug in ${operation})`);
+    const { failureRate = 0, bugProductId, bugRate = 0, random = Math.random } = this.faults;
+    if (productId === bugProductId || random() < bugRate) throw new TypeError(`Cannot read properties of undefined (simulated bug in ${operation})`);
     if (random() < failureRate) throw new StoreTimeoutError(`${operation} timed out`);
   }
 }
