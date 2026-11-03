@@ -207,19 +207,19 @@ npm run produce -- good
 ```
 
 ```
-level=error event=message_dead_lettered partition=1 offset=6 kind=unknown error="Cannot read properties of undefined (simulated bug in get)" alert=high
-level=error event=message_dead_lettered partition=1 offset=7 kind=unknown error="Cannot read properties of undefined (simulated bug in get)" alert=high
 level=error event=message_dead_lettered partition=2 offset=16 kind=unknown error="Cannot read properties of undefined (simulated bug in get)" alert=high
 level=error event=message_dead_lettered partition=2 offset=17 kind=unknown error="Cannot read properties of undefined (simulated bug in get)" alert=high
-level=warn event=retrying partition=2 offset=18 attempt=5 delayMs=259 error="Cannot read properties of undefined (simulated bug in get)"
-level=fatal event=consumer_stopping partition=2 offset=18 kind=unknown error="Cannot read properties of undefined (simulated bug in get)" unknownInARow=5 alert=high
-level=fatal event=consumer_crashed alert=high error="can't process partition 2 offset 18"
+level=error event=message_dead_lettered partition=2 offset=18 kind=unknown error="Cannot read properties of undefined (simulated bug in get)" alert=high
+level=error event=message_dead_lettered partition=2 offset=19 kind=unknown error="Cannot read properties of undefined (simulated bug in get)" alert=high
+level=warn event=retrying partition=1 offset=6 attempt=5 delayMs=4096 error="Cannot read properties of undefined (simulated bug in get)"
+level=fatal event=consumer_stopping partition=1 offset=6 kind=unknown error="Cannot read properties of undefined (simulated bug in get)" unknownInARow=5 alert=high
+level=fatal event=consumer_crashed alert=high error="can't process partition 1 offset 6"
 level=info event=shutting_down exitCode=1
 ```
 
-(Retry lines and KafkaJS's own error lines trimmed.) Four messages are parked, and the consumer stops on the fifth. Partition 2's
-committed offset stays at 18, so the [lag](docs/kafka-commands.md#where-is-the-consumer-group)
-shows where it stopped.
+(Retry lines and KafkaJS's own error lines trimmed.) Four messages are parked, and the consumer
+stops on the fifth. Partition 1's committed offset stays at 6, so the
+[lag](docs/kafka-commands.md#where-is-the-consumer-group) shows where it stopped.
 
 ### 7. Replay after the fix
 
@@ -233,29 +233,44 @@ npm run replay-dlq
 
 ```
 Replayed 11 message(s) from prices.dlq (transient: 6, unknown: 5)
-Left 1 in the DLQ (poison: 1)
+Passed over 1 (poison: 1)
 ```
 
 The consumer, meanwhile:
 
 ```
-...
+level=info event=price_saved partition=1 offset=6 productId=toaster price=21
+level=info event=price_saved partition=1 offset=7 productId=toaster price=19
+level=info event=price_out_of_date partition=1 offset=8 productId=toaster price=21
+level=info event=price_out_of_date partition=1 offset=9 productId=toaster price=19
 level=info event=price_saved partition=2 offset=20 productId=kettle price=20
 level=info event=price_saved partition=2 offset=21 productId=kettle price=18
-level=info event=price_out_of_date partition=2 offset=22 productId=lamp price=22
-level=info event=price_out_of_date partition=2 offset=23 productId=lamp price=20
 ...
 level=error event=message_dead_lettered partition=2 offset=24 kind=unknown error="Cannot read properties of undefined (simulated bug in get)" alert=high
 ```
 
-- The kettle prices parked while the database was down are saved: nothing newer had arrived.
-- The lamp prices from the same outage are ignored: newer lamp prices were saved before the
-  replay. Replay order doesn't matter.
-- The BUG price is parked again, because its simulated bug is never fixed. The replay stops at
-  the end of the DLQ as it was when the replay started, so it doesn't loop.
-- The bad message is left alone. Replaying can't fix it, so by default only `unknown` and
-  `transient` are replayed. `npm run replay-dlq -- poison` would send it back anyway, for example
-  after a parser fix.
+- Offsets 6 and 7 are the toaster prices the consumer stopped on, now saved.
+- The toaster prices parked while the database was down come back as offsets 8 and 9, and are
+  ignored: newer toaster prices were just saved. Replay order doesn't matter.
+- The kettle prices from the same outage are saved: nothing newer had been saved yet.
+- The BUG price is parked again, because its simulated bug is never fixed.
+- The bad message is passed over. Replaying can't fix it, so by default only `unknown` and
+  `transient` are replayed.
+
+Run it again, and it replays only what has been parked since: the BUG price.
+
+```
+Replayed 1 message(s) from prices.dlq (unknown: 1)
+```
+
+The replay is an ordinary consumer group, `price-consumer-dlq-replay`, and keeps its place with
+committed offsets, so nothing is replayed twice. A consumer never finishes on its own, so each
+run stops at the end of the DLQ as it was when the run started. A message that fails again and
+is parked during the run waits for the next run instead of looping. With nothing new, it says
+`Nothing new in prices.dlq since the last replay`.
+
+To send bad messages back anyway, after a parser fix for example, see
+[docs/kafka-commands.md](docs/kafka-commands.md#recipe-replay-the-bad-messages-after-all).
 
 ### 8. An out-of-date price is ignored
 

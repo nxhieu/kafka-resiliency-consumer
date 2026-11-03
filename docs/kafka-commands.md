@@ -72,6 +72,20 @@ Offset:5  kettle  {not json
 Offset:6  kettle  {"productId":"kettle","price":24,"updatedAt":1793535324814}
 ```
 
+The first and last offset of each partition:
+
+```bash
+k kafka-get-offsets.sh --topic prices              # end offsets (the next offset to be written)
+k kafka-get-offsets.sh --topic prices --time -2    # earliest offsets still kept
+k kafka-get-offsets.sh --topic prices --partitions 2
+```
+
+```
+prices:0:60
+prices:1:12
+prices:2:38
+```
+
 ## Look at the DLQ
 
 A parked message keeps its original key and value. Where it came from and why it failed are in
@@ -91,23 +105,42 @@ The key is kept, so a product's parked messages land on one DLQ partition, in th
 were parked. `dlq.original.partition` and `dlq.original.offset` point at the original, which is
 still in `prices` until retention deletes it.
 
-To send parked messages back once the cause is fixed, use `npm run replay-dlq` (see
-[scenario 7](../README.md#7-replay-after-the-fix)). It replays `unknown` and `transient` messages
-by default. Bad messages (`poison`) fail the same way every time, so look at them instead.
+### Replay it
 
-The first and last offset of each partition:
+Once the cause is fixed, `npm run replay-dlq` sends parked messages back to `prices` (see
+[scenario 7](../README.md#7-replay-after-the-fix)). It replays `unknown` and `transient` messages
+by default. Bad messages (`poison`) fail the same way every time, so it passes over them.
+
+The replay is an ordinary consumer group, `price-consumer-dlq-replay`, and keeps its place with
+committed offsets. Its lag is the number of parked messages nobody has replayed yet:
 
 ```bash
-k kafka-get-offsets.sh --topic prices              # end offsets (the next offset to be written)
-k kafka-get-offsets.sh --topic prices --time -2    # earliest offsets still kept
-k kafka-get-offsets.sh --topic prices --partitions 2
+k kafka-consumer-groups.sh --describe --group price-consumer-dlq-replay
 ```
 
 ```
-prices:0:60
-prices:1:12
-prices:2:38
+GROUP                      TOPIC       PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+price-consumer-dlq-replay  prices.dlq  0          0               0               0
+price-consumer-dlq-replay  prices.dlq  1          2               2               0
+price-consumer-dlq-replay  prices.dlq  2          13              13              0
 ```
+
+### Recipe: replay the bad messages after all
+
+Passed-over messages are committed too, so the next replay won't see them. If a parser fix means
+they'd now be accepted, rewind the replay group and ask for `poison` only:
+
+```bash
+k kafka-consumer-groups.sh --reset-offsets --group price-consumer-dlq-replay --topic prices.dlq --to-earliest --execute
+npm run replay-dlq -- poison
+```
+
+```
+Replayed 1 message(s) from prices.dlq (poison: 1)
+Passed over 14 (transient: 6, unknown: 8)
+```
+
+Only the replay group moves. The DLQ's messages and the consumer's own offsets don't change.
 
 ## Send messages by hand
 
