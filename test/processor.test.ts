@@ -6,6 +6,7 @@ import { inbound, makeDeps } from "./helpers.js";
 
 const heartbeat = () => Promise.resolve();
 const kettle = (price: number, updatedAt: number) => ({ productId: "kettle", price, updatedAt });
+const bug = { productId: "BUG", price: 1, updatedAt: 1 };
 
 describe("processMessage", () => {
   it("saves a valid price", async () => {
@@ -36,12 +37,15 @@ describe("processMessage", () => {
     expect(beat).toHaveBeenCalledTimes(2);
   });
 
-  it("skips a malformed message without retrying it", async () => {
+  it("parks a malformed message in the DLQ without retrying it", async () => {
     const store = new InMemoryPriceStore();
     const get = vi.spyOn(store, "get");
+    const deps = makeDeps(store);
+    const msg = inbound("{not json");
 
-    await expect(processMessage(inbound("{not json"), makeDeps(store), heartbeat)).resolves.toBe("skipped");
+    await expect(processMessage(msg, deps, heartbeat)).resolves.toBe("dead-lettered");
     expect(get).not.toHaveBeenCalled();
+    expect(deps.parked).toEqual([{ msg, kind: "poison", error: "message body is not valid JSON" }]);
   });
 
   it.each([
@@ -49,28 +53,73 @@ describe("processMessage", () => {
     ["a negative price", { productId: "kettle", price: -1, updatedAt: 1 }],
     ["a price that isn't a number", { productId: "kettle", price: "1", updatedAt: 1 }],
     ["no updatedAt", { productId: "kettle", price: 1 }],
-  ])("skips a message with %s", async (_, body) => {
-    await expect(processMessage(inbound(body), makeDeps(new InMemoryPriceStore()), heartbeat)).resolves.toBe("skipped");
+  ])("parks a message with %s", async (_, body) => {
+    const deps = makeDeps(new InMemoryPriceStore());
+
+    await expect(processMessage(inbound(body), deps, heartbeat)).resolves.toBe("dead-lettered");
+    expect(deps.parked.map(({ kind }) => kind)).toEqual(["poison"]);
   });
 
-  it("skips after the database fails every retry", async () => {
+  it("parks a message after the database fails every retry", async () => {
     const store = new InMemoryPriceStore({ failureRate: 1 });
     const get = vi.spyOn(store, "get");
+    const deps = makeDeps(store);
 
-    await expect(processMessage(inbound(kettle(25, 1)), makeDeps(store), heartbeat)).resolves.toBe("skipped");
+    await expect(processMessage(inbound(kettle(25, 1)), deps, heartbeat)).resolves.toBe("dead-lettered");
     expect(get).toHaveBeenCalledTimes(6);
+    expect(deps.parked.map(({ kind }) => kind)).toEqual(["transient"]);
   });
 
-  it("stops on an unknown error, in a way KafkaJS won't retry", async () => {
+  it("parks a message that hits a bug, after retrying it", async () => {
     const store = new InMemoryPriceStore({ bugProductId: "kettle" });
     const get = vi.spyOn(store, "get");
+    const deps = makeDeps(store);
 
-    const result = processMessage(inbound(kettle(25, 1)), makeDeps(store), heartbeat);
+    await expect(processMessage(inbound(kettle(25, 1)), deps, heartbeat)).resolves.toBe("dead-lettered");
+    // Retried first, in case it's a transient error nobody has classified yet.
+    expect(get).toHaveBeenCalledTimes(6);
+    expect(deps.parked).toEqual([expect.objectContaining({ kind: "unknown", error: expect.stringContaining("simulated bug") })]);
+  });
+
+  it("stops on the fifth unknown error in a row, in a way KafkaJS won't retry", async () => {
+    const deps = makeDeps(new InMemoryPriceStore({ bugRate: 1 }));
+    for (const offset of ["1", "2", "3", "4"]) {
+      await expect(processMessage(inbound(kettle(25, 1), offset), deps, heartbeat)).resolves.toBe("dead-lettered");
+    }
+
+    const result = processMessage(inbound(kettle(25, 1), "5"), deps, heartbeat);
 
     await expect(result).rejects.toBeInstanceOf(StopConsumerError);
     await expect(result).rejects.toMatchObject({ retriable: false });
-    // Retried first, in case it's a transient error nobody has classified yet.
-    expect(get).toHaveBeenCalledTimes(6);
+    // The fifth isn't parked. Its offset isn't committed, so the consumer stays on it.
+    expect(deps.parked.map(({ msg }) => msg.offset)).toEqual(["1", "2", "3", "4"]);
+  });
+
+  it("starts counting again after a price is saved", async () => {
+    const deps = makeDeps(new InMemoryPriceStore({ bugProductId: "BUG" }));
+
+    for (const body of [bug, bug, bug, bug, kettle(25, 1), bug, bug, bug, bug]) {
+      await processMessage(inbound(body), deps, heartbeat);
+    }
+    expect(deps.parked).toHaveLength(8);
+  });
+
+  it("doesn't count a bad message as a success", async () => {
+    const deps = makeDeps(new InMemoryPriceStore({ bugProductId: "BUG" }));
+    for (const body of [bug, bug, "{not json", bug, bug]) {
+      await processMessage(inbound(body), deps, heartbeat);
+    }
+
+    await expect(processMessage(inbound(bug), deps, heartbeat)).rejects.toBeInstanceOf(StopConsumerError);
+  });
+
+  it("stops when the DLQ can't be written, so the message is read again after the restart", async () => {
+    const deps = makeDeps(new InMemoryPriceStore(), { deadLetter: () => Promise.reject(new Error("broker unreachable")) });
+
+    const result = processMessage(inbound("{not json"), deps, heartbeat);
+
+    await expect(result).rejects.toBeInstanceOf(StopConsumerError);
+    await expect(result).rejects.toMatchObject({ retriable: false, cause: new Error("broker unreachable") });
   });
 
   it("re-reads and retries when another writer gets in between the read and the write", async () => {

@@ -33,6 +33,7 @@ k() { docker exec -i kafka "/opt/kafka/bin/$1" --bootstrap-server localhost:9092
 ```bash
 k kafka-topics.sh --list
 k kafka-topics.sh --create --topic prices --partitions 3
+k kafka-topics.sh --create --topic prices.dlq --partitions 3
 k kafka-topics.sh --describe --topic prices
 ```
 
@@ -85,6 +86,62 @@ prices:1:12
 prices:2:38
 ```
 
+## Look at the DLQ
+
+A parked message keeps its original key and value. Where it came from and why it failed are in
+headers, so print those too:
+
+```bash
+k kafka-console-consumer.sh --topic prices.dlq --partition 2 --offset 0 --max-messages 2 \
+  --property print.offset=true --property print.key=true --property print.headers=true
+```
+
+```
+Offset:0  dlq.original.topic:prices,dlq.original.partition:2,dlq.original.offset:5,dlq.error.kind:poison,dlq.error.message:message body is not valid JSON,dlq.failed.at:2026-11-03T03:33:24.164Z  kettle  {not json
+Offset:1  dlq.original.topic:prices,dlq.original.partition:2,dlq.original.offset:7,dlq.error.kind:transient,dlq.error.message:get timed out,dlq.failed.at:2026-11-03T03:33:44.494Z  kettle  {"productId":"kettle","price":20,"updatedAt":1793676818061}
+```
+
+The key is kept, so a product's parked messages land on one DLQ partition, in the order they
+were parked. `dlq.original.partition` and `dlq.original.offset` point at the original, which is
+still in `prices` until retention deletes it.
+
+### Replay it
+
+Once the cause is fixed, `npm run replay-dlq` sends parked messages back to `prices` (see
+[scenario 7](../README.md#7-replay-after-the-fix)). It replays `unknown` and `transient` messages
+by default. Bad messages (`poison`) fail the same way every time, so it passes over them.
+
+The replay is an ordinary consumer group, `price-consumer-dlq-replay`, and keeps its place with
+committed offsets. Its lag is the number of parked messages nobody has replayed yet:
+
+```bash
+k kafka-consumer-groups.sh --describe --group price-consumer-dlq-replay
+```
+
+```
+GROUP                      TOPIC       PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+price-consumer-dlq-replay  prices.dlq  0          0               0               0
+price-consumer-dlq-replay  prices.dlq  1          2               2               0
+price-consumer-dlq-replay  prices.dlq  2          13              13              0
+```
+
+### Recipe: replay the bad messages after all
+
+Passed-over messages are committed too, so the next replay won't see them. If a parser fix means
+they'd now be accepted, rewind the replay group and ask for `poison` only:
+
+```bash
+k kafka-consumer-groups.sh --reset-offsets --group price-consumer-dlq-replay --topic prices.dlq --to-earliest --execute
+npm run replay-dlq -- poison
+```
+
+```
+Replayed 1 message(s) from prices.dlq (poison: 1)
+Passed over 14 (transient: 6, unknown: 8)
+```
+
+Only the replay group moves. The DLQ's messages and the consumer's own offsets don't change.
+
 ## Send messages by hand
 
 `parse.key=true` reads `key|value` from each line. The `|` separator is used because JSON is full
@@ -115,7 +172,7 @@ k kafka-consumer-groups.sh --describe --group price-consumer --members  # who's 
 k kafka-consumer-groups.sh --describe --group price-consumer --state    # Stable, Empty, rebalancing...
 ```
 
-After the consumer stops on a bad message, the lag shows exactly where it's stuck:
+After the consumer stops, the lag shows exactly where it's stuck:
 
 ```
 Consumer group 'price-consumer' has no active members.
@@ -150,8 +207,8 @@ Rules:
 
 ### Recipe: skip the one message the consumer is stuck on
 
-This is what you do after the [bug scenario](../README.md#5-a-bug-stops-the-consumer), once you've
-decided the message can be dropped:
+This is what you do after a [stop](../README.md#6-a-broken-deploy-stops-the-consumer), once
+you've decided the message can be dropped rather than fixed and processed:
 
 ```bash
 k kafka-consumer-groups.sh --reset-offsets --group price-consumer --topic prices:2 --shift-by 1 --dry-run
@@ -185,8 +242,8 @@ k kafka-consumer-groups.sh --reset-offsets --group price-consumer --topic prices
 
 ### Things that catch people out
 
-- **A rewind replays bad messages too.** Rewinding partition 2 to before offset 7 hits the bug
-  message again and stops the consumer again.
+- **A rewind replays bad messages too.** Rewinding partition 2 to before a parked message
+  processes it again, and parks it again: the DLQ ends up with two copies.
 - **Replays are only safe if processing is idempotent.** Here an out-of-date price is ignored, so
   replaying old messages can't overwrite newer data.
 - **"Stable" after you've stopped the consumer** means it didn't leave the group cleanly (it was
@@ -199,11 +256,13 @@ k kafka-consumer-groups.sh --reset-offsets --group price-consumer --topic prices
 ```bash
 k kafka-consumer-groups.sh --delete --group price-consumer   # the consumer starts from the beginning again
 k kafka-topics.sh --delete --topic prices                    # throws away the messages too
+k kafka-topics.sh --delete --topic prices.dlq                # and the parked ones
 k kafka-topics.sh --create --topic prices --partitions 3
+k kafka-topics.sh --create --topic prices.dlq --partitions 3
 ```
 
 Deleting the group means the next run reads the whole topic again (this consumer subscribes with
-`fromBeginning: true`), bad messages included.
+`fromBeginning: true`), bad messages included, and parks them again.
 
 ## On a real cluster
 

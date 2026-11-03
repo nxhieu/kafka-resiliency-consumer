@@ -27,7 +27,7 @@ export function classify(err: unknown): ErrorKind {
   if (err instanceof TransientError) return "transient";
   if (err instanceof Error && "code" in err && TRANSIENT_CODES.has(String(err.code))) return "transient";
   // Anything else is probably a bug. It's retried in case it's a transient error we
-  // haven't classified yet, but it's never skipped.
+  // haven't classified yet, then parked with a high alert, and a run of them stops the consumer.
   return "unknown";
 }
 
