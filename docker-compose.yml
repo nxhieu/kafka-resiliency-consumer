@@ -4,3 +4,35 @@ services:
     container_name: kafka
     ports:
       - "9092:9092"
+    environment:
+      # Setting any KAFKA_* variable replaces the image's built-in config, so this is the
+      # whole single-node setup: one process that is both the broker and the controller.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      # A client connects to the address it was given, then reconnects to the address the
+      # broker advertises. So each kind of client gets its own listener:
+      #   HOST      localhost:9092  your machine (npm start, the CLI inside this container)
+      #   INTERNAL  kafka:19092     other containers on the compose network (kafka-ui)
+      KAFKA_LISTENERS: "HOST://:9092,INTERNAL://:19092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "HOST://localhost:9092,INTERNAL://kafka:19092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "HOST:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      # One broker can hold only one copy of Kafka's internal topics.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_DIRS: "/tmp/kraft-combined-logs"
+
+  # Web UI for browsing topics, messages and consumer lag: http://localhost:8080
+  kafka-ui:
+    image: kafbat/kafka-ui:v1.5.0
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: "local"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:19092"
+    depends_on:
+      - kafka

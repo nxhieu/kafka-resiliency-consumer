@@ -73,6 +73,8 @@ npm run produce -- good      # terminal 2: send messages
 
 Stop the consumer with Ctrl+C. The database is in memory, so it starts empty on every run.
 
+To see topics, messages and consumer lag in a browser, open the Kafka UI at http://localhost:8080.
+
 ## Scenarios
 
 The output below is real, with timestamps removed.
